@@ -551,9 +551,29 @@ func WebServer(port int) nodeOptWebServer { return nodeOptWebServer(port) }
 // for all TTA agents to connect. It should be called after all AddNetwork/AddNode calls.
 func (e *Env) Start() {
 	t := e.t
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+
+	// Bound the bring-up context to the test deadline (less 30s of headroom
+	// for the console dump) so a stuck node fails via Fatalf, which runs
+	// t.Cleanup, rather than a `go test -timeout` panic, which skips it. Fall
+	// back to 10m when the test has no deadline.
+	timeout := 10 * time.Minute
+	if dl, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
+		if d, ok := dl.Deadline(); ok {
+			timeout = time.Until(d) - 30*time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	e.ctx = ctx
+
+	// On failure, dump each VM's console log tail to aid debugging (e.g. a node
+	// stuck in cloud-init or that never acquired a DHCP lease). Registered
+	// before boot so it fires for boot and agent-wait failures alike.
+	t.Cleanup(func() {
+		if t.Failed() {
+			e.dumpConsoles()
+		}
+	})
 
 	e.initNodeStatus()
 	e.maybeStartWebServer()
@@ -593,7 +613,14 @@ func (e *Env) Start() {
 	// Boot all nodes in parallel. Each platform handles its own
 	// dependencies (image prep, binary compilation, socket setup)
 	// via sync.Once, so independent work overlaps naturally.
+	//
+	// Under TCG, concurrent boots oversubscribe the host CPUs and a heavy
+	// guest can starve its siblings past the stuck-detector; serialize boots
+	// there so each clears that gate before the next starts. KVM stays parallel.
 	var bootEg errgroup.Group
+	if !hardwareAccelAvailable() {
+		bootEg.SetLimit(1)
+	}
 	for _, n := range e.nodes {
 		bootEg.Go(func() error {
 			return n.platform().boot(ctx, e, n)
@@ -1343,6 +1370,19 @@ func (e *Env) SSHExec(n *Node, cmd string) (string, error) {
 			return string(out), err
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// dumpConsoles logs the tail of each QEMU VM's console log. It's called on test
+// failure to help debug nodes that never booted or finished provisioning.
+// macOS (tailmac) nodes don't write a console log here, so they're skipped.
+func (e *Env) dumpConsoles() {
+	for _, n := range e.nodes {
+		if n.os.IsMacOS {
+			continue
+		}
+		logPath := filepath.Join(e.tempDir, n.name+".log")
+		dumpLogTail(e.t, n.name, "console", logPath)
 	}
 }
 
