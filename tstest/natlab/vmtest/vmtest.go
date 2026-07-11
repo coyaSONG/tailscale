@@ -432,7 +432,8 @@ type Node struct {
 	advertiseRoutes  string
 	snatSubnetRoutes *bool // nil means default (true)
 	webServerPort    int
-	sshPort          int // host port for SSH debug access (cloud VMs only)
+	sshPort          int     // host port for SSH debug access (cloud VMs only)
+	dnsMode          DNSMode // desired Linux DNS backend to provision; "" means the image default
 }
 
 // AddNode creates a new VM node. The name is used for identification and as the
@@ -467,6 +468,8 @@ func (e *Env) AddNode(name string, opts ...any) *Node {
 			n.snatSubnetRoutes = &v
 		case nodeOptWebServer:
 			n.webServerPort = int(o)
+		case nodeOptDNSMode:
+			n.dnsMode = DNSMode(o)
 		default:
 			// Pass through to vnet (TailscaledEnv, NodeOption, MAC, etc.)
 			vnetOpts = append(vnetOpts, o)
@@ -519,6 +522,23 @@ type nodeOptNoAgent struct{}
 type nodeOptAdvertiseRoutes string
 type nodeOptSNATSubnetRoutes bool
 type nodeOptWebServer int
+type nodeOptDNSMode DNSMode
+
+// DNSMode selects which Linux DNS backend a node's tailscaled ends up using,
+// by provisioning the guest before tailscaled starts. It lets one distro image
+// cover multiple backends. Values match the modes in net/dns/manager_linux.go;
+// assert the result with [Env.AssertDNSBackend].
+type DNSMode string
+
+const (
+	// DNSDefault leaves the image's DNS configuration untouched (typically
+	// systemd-resolved on modern distros).
+	DNSDefault DNSMode = ""
+
+	// DNSDirect masks systemd-resolved and installs a plain /etc/resolv.conf
+	// so tailscaled selects the "direct" manager (rewrites resolv.conf itself).
+	DNSDirect DNSMode = "direct"
+)
 
 // OS returns a NodeOption that sets the node's operating system image.
 func OS(img OSImage) nodeOptOS { return nodeOptOS(img) }
@@ -546,6 +566,11 @@ func SNATSubnetRoutes(v bool) nodeOptSNATSubnetRoutes { return nodeOptSNATSubnet
 // WebServer returns a NodeOption that starts a webserver on the given port.
 // The webserver responds with "Hello world I am <nodename> from <sourceIP>" on all requests.
 func WebServer(port int) nodeOptWebServer { return nodeOptWebServer(port) }
+
+// WithDNSMode returns a NodeOption that provisions the (Linux) node so
+// tailscaled selects the given DNS backend. Only meaningful for Linux cloud
+// images; ignored for gokrazy/macOS. See [DNSMode].
+func WithDNSMode(m DNSMode) nodeOptDNSMode { return nodeOptDNSMode(m) }
 
 // Start initializes the virtual network, boots all VMs in parallel, and waits
 // for all TTA agents to connect. It should be called after all AddNetwork/AddNode calls.
@@ -981,6 +1006,46 @@ func (e *Env) ClientMetrics(n *Node) ClientMetrics {
 		}
 	}
 	return out
+}
+
+// dnsBackendMetricPrefix is the prefix of the clientmetric gauge that
+// tailscaled sets to 1 for the Linux DNS mode it selected. See
+// net/dns/manager_linux.go.
+const dnsBackendMetricPrefix = "dns_manager_linux_mode_"
+
+// DNSBackend returns the Linux DNS backend ("mode") the node's tailscaled
+// selected (e.g. "systemd-resolved", "direct"), read from the
+// dns_manager_linux_mode_* client metric. It fails the test if no backend
+// gauge is set (non-Linux node, or tailscaled hasn't configured DNS yet).
+func (e *Env) DNSBackend(n *Node) string {
+	e.t.Helper()
+	var found string
+	for name, m := range e.ClientMetrics(n) {
+		mode, ok := strings.CutPrefix(name, dnsBackendMetricPrefix)
+		if !ok || m.Value != 1 {
+			continue
+		}
+		if found != "" {
+			e.t.Fatalf("Node %q: multiple DNS backend gauges set (%q and %q)", n.Name(), found, mode)
+		}
+		// The metric name sanitizes "-" to "_"; undo that to recover the
+		// mode string used by net/dns (e.g. "systemd_resolved" -> "systemd-resolved").
+		found = strings.ReplaceAll(mode, "_", "-")
+	}
+	if found == "" {
+		e.t.Fatalf("Node %q: no %s* gauge set; DNS backend unknown (non-Linux node, or tailscaled hasn't configured DNS yet)", n.Name(), dnsBackendMetricPrefix)
+	}
+	return found
+}
+
+// AssertDNSBackend fails the test unless the node's selected Linux DNS backend
+// matches want (see [Env.DNSBackend] for the mode strings). Use it in distro
+// tests to prove the node exercises the intended DNS manager.
+func (e *Env) AssertDNSBackend(n *Node, want string) {
+	e.t.Helper()
+	if got := e.DNSBackend(n); got != want {
+		e.t.Fatalf("Node %q: DNS backend = %q, want %q", n.Name(), got, want)
+	}
 }
 
 // ClientMetrics is a view of the client metrics exported by a node.

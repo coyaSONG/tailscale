@@ -19,14 +19,32 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
+// LinuxFamily classifies a Linux distro by the conventions that affect how we
+// provision it via cloud-init (SELinux, default network manager, etc). It is
+// only meaningful when GOOS()=="linux".
+type LinuxFamily string
+
+const (
+	// LinuxDebian covers Debian and Ubuntu cloud images: systemd-networkd for
+	// networking and no SELinux enforcement by default. This is the zero-value
+	// family, so images that don't set Family are treated as Debian-like.
+	LinuxDebian LinuxFamily = ""
+
+	// LinuxRHEL covers Fedora, CentOS Stream, Rocky, and AlmaLinux cloud
+	// images: NetworkManager + systemd-resolved for networking and SELinux
+	// enforcing by default.
+	LinuxRHEL LinuxFamily = "rhel"
+)
+
 // OSImage describes a VM operating system image.
 type OSImage struct {
 	Name      string
-	URL       string // download URL for the cloud image
-	SHA256    string // expected SHA256 hash of the image (of the final qcow2, after any decompression)
-	MemoryMB  int    // RAM for the VM
-	IsGokrazy bool   // true for gokrazy images (different QEMU setup)
-	IsMacOS   bool   // true for macOS images (launched via tailmac, not QEMU)
+	URL       string      // download URL for the cloud image
+	SHA256    string      // expected SHA256 hash of the image (of the final qcow2, after any decompression)
+	MemoryMB  int         // RAM for the VM
+	Family    LinuxFamily // Linux distro family (affects cloud-init user-data); empty means Debian-like
+	IsGokrazy bool        // true for gokrazy images (different QEMU setup)
+	IsMacOS   bool        // true for macOS images (launched via tailmac, not QEMU)
 }
 
 // GOOS returns the Go OS name for this image.
@@ -81,6 +99,15 @@ var (
 		MemoryMB: 1024,
 	}
 
+	// Fedora43 is the Fedora 43 Cloud Base image: NetworkManager +
+	// systemd-resolved, SELinux enforcing, hence LinuxRHEL.
+	Fedora43 = OSImage{
+		Name:     "fedora-43",
+		URL:      "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2",
+		MemoryMB: 1024,
+		Family:   LinuxRHEL,
+	}
+
 	// MacOS is a macOS VM launched via tailmac (Apple Virtualization.framework).
 	// Uses a Tart pre-built base image (ghcr.io/cirruslabs/macos-tahoe-base)
 	// which is automatically pulled on first use. Only runs on macOS arm64 hosts.
@@ -96,7 +123,7 @@ var (
 // uses a separate snapshot pipeline). It is intended for tooling such as
 // a CI prep step that wants to warm the image cache.
 func CloudImages() []OSImage {
-	return []OSImage{Ubuntu2404, Debian12, FreeBSD150}
+	return []OSImage{Ubuntu2404, Debian12, FreeBSD150, Fedora43}
 }
 
 // EnsureImage downloads img to the local cache if not already present.
