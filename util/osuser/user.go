@@ -118,6 +118,12 @@ func checkGetentInput(usernameOrUID string) bool {
 	if len(usernameOrUID) > maxUid || len(usernameOrUID) == 0 {
 		return false
 	}
+
+	// Leading dashes aren't valid for usernames.
+	if strings.HasPrefix(usernameOrUID, "-") {
+		return false
+	}
+
 	for _, r := range usernameOrUID {
 		if r < ' ' || r == 0x7f || r == utf8.RuneError { // TODO(bradfitz): more?
 			return false
@@ -139,7 +145,18 @@ func userLookupGetent(usernameOrUID string, std lookupStd) (*user.User, string, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "getent", "passwd", usernameOrUID).Output()
+
+	args := []string{"passwd"}
+	// Append "--" on linux to signal end of command options as a sanity measure to
+	// prevent a username or UID from being interpreted as a command option.
+	// Skip this for BSD / Darwin as getent there does not take options and passing
+	// "--" instead breaks the call.
+	if runtime.GOOS == "linux" {
+		args = append(args, "--")
+	}
+	args = append(args, usernameOrUID)
+
+	out, err := exec.CommandContext(ctx, "getent", args...).Output()
 	if err != nil {
 		log.Printf("error calling getent for user %q: %v", usernameOrUID, err)
 		u, err := std(usernameOrUID)
