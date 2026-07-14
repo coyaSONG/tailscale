@@ -59,9 +59,8 @@ func TestMain(m *testing.M) {
 	os.Setenv("TS_DISABLE_UPNP", "true")
 	flag.Parse()
 	if *runWindowsServiceTests {
-		// The Windows service is a singleton (one service, one pipe, one state
-		// dir), so tests against it must run serially. envknob.Setenv refreshes
-		// the already-registered TS_SERIAL_TESTS that tstest.Parallel reads.
+		// The Windows service is a singleton, so its tests must run serially.
+		// envknob.Setenv refreshes the TS_SERIAL_TESTS that tstest.Parallel reads.
 		envknob.Setenv("TS_SERIAL_TESTS", "true")
 	}
 	v := m.Run()

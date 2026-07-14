@@ -11,12 +11,11 @@ import (
 	"tailscale.com/tstest"
 )
 
-// Issue 2137: make sure Windows tailscaled works with the CLI alone, without
-// the GUI to kick off a Start. Runs tailscaled as a real Windows service via
-// WindowsServiceMode; see NewTestEnv's Windows gating.
+// Issue 2137: Windows tailscaled works from the CLI alone, without the GUI to
+// start it. Runs as a Windows service; see NewTestEnv's Windows gating.
 func TestOneNodeUpWindowsStyle(t *testing.T) {
 	tstest.Parallel(t)
-	env := NewTestEnv(t, WindowsServiceMode())
+	env := NewTestEnv(t, UnskipOnWindows())
 	n1 := NewTestNode(t, env)
 	n1.upFlagGOOS = "windows"
 

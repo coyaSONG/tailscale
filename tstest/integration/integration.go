@@ -60,9 +60,8 @@ var (
 	verboseTailscaled = flag.Bool("verbose-tailscaled", false, "verbose tailscaled logging")
 	verboseTailscale  = flag.Bool("verbose-tailscale", false, "verbose tailscale CLI logging")
 
-	// runWindowsServiceTests enables the Windows service-mode integration tests
-	// (tailscaled installed as a service). On by default in CI. Tests opt in via
-	// NewTestEnv(t, WindowsServiceMode()) and run serially in this mode.
+	// runWindowsServiceTests enables the Windows service-mode integration tests.
+	// On by default in CI; tests opt in via NewTestEnv(t, UnskipOnWindows()).
 	runWindowsServiceTests = flag.Bool("run-windows-service-tests", cibuild.On(), "run Windows service-mode integration tests")
 )
 
@@ -542,32 +541,30 @@ func (f ConfigureControl) ModifyTestEnv(te *TestEnv) {
 	f(te.Control)
 }
 
-// windowsServiceOpt is the TestEnvOpt returned by WindowsServiceMode.
-type windowsServiceOpt struct{}
+// unskipOnWindowsOpt is the TestEnvOpt returned by UnskipOnWindows.
+type unskipOnWindowsOpt struct{}
 
-func (windowsServiceOpt) ModifyTestEnv(te *TestEnv) { te.windowsService = true }
+func (unskipOnWindowsOpt) ModifyTestEnv(te *TestEnv) { te.windowsService = true }
 
-// WindowsServiceMode makes NewTestEnv run tailscaled as a Windows service
-// (install-system-daemon) rather than a userspace child process. It's a no-op
-// off Windows. Only tests that pass it run on Windows; all others skip there.
-func WindowsServiceMode() TestEnvOpt { return windowsServiceOpt{} }
+// UnskipOnWindows runs this test on Windows (as a service, the only mode so far).
+//
+// TODO: temporary; removed once tstest.SkipOnWindows lets tests run on Windows by default.
+func UnskipOnWindows() TestEnvOpt { return unskipOnWindowsOpt{} }
 
 // NewTestEnv starts a bunch of services and returns a new test environment.
 // NewTestEnv arranges for the environment's resources to be cleaned up on exit.
 func NewTestEnv(t testing.TB, opts ...TestEnvOpt) *TestEnv {
-	// Integration tests skip on Windows unless a test opts into service mode
-	// via WindowsServiceMode(); a Windows service is a singleton, so the generic
-	// (often multi-node) tests can't run against it. Pre-scan the opts for the
-	// service marker before starting any servers so a skip leaks nothing.
-	serviceMode := false
+	// Integration tests skip on Windows unless a test opts in via UnskipOnWindows.
+	// Pre-scan the opts before starting any servers so a skip leaks nothing.
+	unskipWindows := false
 	for _, o := range opts {
-		if _, ok := o.(windowsServiceOpt); ok {
-			serviceMode = true
+		if _, ok := o.(unskipOnWindowsOpt); ok {
+			unskipWindows = true
 		}
 	}
 	if runtime.GOOS == "windows" {
-		if !serviceMode {
-			t.Skip("integration tests skip on Windows unless run in service mode")
+		if !unskipWindows {
+			t.Skip("integration tests skip on Windows unless the test calls UnskipOnWindows")
 		}
 		if !*runWindowsServiceTests {
 			t.Skip("Windows service tests disabled (--run-windows-service-tests=false)")
@@ -857,12 +854,8 @@ func (n *TestNode) awaitTailscaledRunnable() error {
 	return nil
 }
 
-// daemonEnv returns the environment tailscaled is started with, shared by the
-// userspace child-process path (StartDaemonAsIPNGOOS) and the Windows service
-// path (which writes it to tailscaled-env.txt, since a service doesn't inherit
-// the test process's environment). ipnGOOS is the OS tailscaled should believe
-// it's running as. It does not include TS_PARENT_DEATH_FD, which is specific to
-// the child-process path.
+// daemonEnv returns the extra environment variables to use when starting tailscaled.
+// The ipnGOOS argument overrides [envknob.GOOS].
 func (n *TestNode) daemonEnv(ipnGOOS string) []string {
 	env := []string{
 		"TS_DEBUG_PERMIT_HTTP_C2N=1",
@@ -909,8 +902,7 @@ func (n *TestNode) StartDaemonAsIPNGOOS(ipnGOOS string) *Daemon {
 	}
 
 	if n.env.windowsService {
-		// Service mode has no stderr pipe; keep a parser so other helpers
-		// that reference it don't dereference nil.
+		// TODO(#20443): plumb service logs here so races/panics/DEBUG-ADDR are seen in service mode.
 		n.tailscaledParser = &nodeOutputParser{n: n}
 		return n.startWindowsServiceDaemon()
 	}
